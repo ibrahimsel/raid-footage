@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using RustCctv.Configuration;
+using RustCctv.Rendering;
 using RustPlusApi;
 using RustPlusApi.Camera;
 using RustPlusApi.Data;
@@ -17,12 +18,10 @@ public sealed class RustCameraClient : IAsyncDisposable
     private readonly TaskCompletionSource firstFrame = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<string> failed = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private CameraController? controller;
-    private CameraRenderer? renderer;
+    private CctvRenderer? renderer;
     private long lastFrameAt;
     private int width;
     private int height;
-    private byte[]? lastPng;
-    private bool dirty = true;
     private bool disposed;
 
     public RustCameraClient(RustConnectionOptions connection, RecorderOptions options)
@@ -52,7 +51,7 @@ public sealed class RustCameraClient : IAsyncDisposable
             throw new CameraSessionException("Unsupported camera dimensions.");
         width = controller.Info.Width;
         height = controller.Info.Height;
-        renderer = new CameraRenderer(width, height);
+        renderer = new CctvRenderer(width, height, options);
         controller.OnKeepAliveFailed += OnKeepAliveFailed;
         controller.OnFrameReceived += OnFrame;
 
@@ -75,7 +74,6 @@ public sealed class RustCameraClient : IAsyncDisposable
             {
                 if (disposed || renderer is null) return;
                 renderer.AddRays(frame);
-                dirty = true;
                 Interlocked.Exchange(ref lastFrameAt, Stopwatch.GetTimestamp());
             }
             firstFrame.TrySetResult();
@@ -103,12 +101,8 @@ public sealed class RustCameraClient : IAsyncDisposable
         lock (rendererLock)
         {
             ObjectDisposedException.ThrowIf(disposed, this);
-            if (dirty || lastPng is null)
-            {
-                lastPng = renderer!.Render();
-                dirty = false;
-            }
-            return lastPng;
+            // Render even without a new packet so expired samples/labels disappear.
+            return renderer!.Render();
         }
     }
 

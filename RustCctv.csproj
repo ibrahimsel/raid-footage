@@ -14,5 +14,6 @@
   <ItemGroup>
     <None Update="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
     <Compile Remove="tests/**/*.cs" />
+    <Compile Remove="test-output/**/*.cs" />
   </ItemGroup>
 </Project>

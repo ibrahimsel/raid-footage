@@ -21,6 +21,8 @@ var ffprobe = Environment.GetEnvironmentVariable("TEST_FFPROBE") ?? "ffprobe";
 var output = Path.GetFullPath(Path.Combine("test-output", Guid.NewGuid().ToString("N")));
 using var loggers = LoggerFactory.Create(b => b.AddSimpleConsole(o => o.SingleLine = true));
 Console.WriteLine($"Integration runtime: {Environment.Version}; output: {output}");
+RendererChecks.Run(output);
+if (args.Contains("--renderer-only")) return 0;
 await using var server = new CameraServer();
 await server.StartAsync();
 Environment.SetEnvironmentVariable("RUST_SERVER", "127.0.0.1");
@@ -30,7 +32,7 @@ Environment.SetEnvironmentVariable("RUST_PLAYER_TOKEN", "123456789"); // synthet
 var connection = RustConnectionOptions.FromEnvironment();
 var options = new RecorderOptions
 {
-    CameraId = "TEST_CAMERA", OutputDirectory = output, Fps = 2, SegmentMinutes = 2.0 / 60,
+    CameraId = "TEST_CAMERA", OutputDirectory = output, Fps = 10, RenderScale = 2, SegmentMinutes = 2.0 / 60,
     FfmpegPath = ffmpeg, FrameTimeoutSeconds = 2, RequestTimeoutSeconds = 2, ReconnectMaxSeconds = 2
 };
 var paths = new RecordingPathFactory(options);
@@ -58,11 +60,11 @@ foreach (var clip in clips)
     var stream = json.RootElement.GetProperty("streams")[0];
     Check(stream.GetProperty("codec_name").GetString() == "h264", "H.264 codec");
     Check(stream.GetProperty("pix_fmt").GetString() == "yuv420p", "compatible pixel format");
-    Check(stream.GetProperty("r_frame_rate").GetString() == "2/1", "configured constant frame rate");
-    Check(stream.GetProperty("width").GetInt32() == 64 && stream.GetProperty("height").GetInt32() == 48, "render dimensions");
+    Check(stream.GetProperty("r_frame_rate").GetString() == "10/1", "configured constant frame rate");
+    Check(stream.GetProperty("width").GetInt32() == 128 && stream.GetProperty("height").GetInt32() == 96, "render dimensions");
     var frames = int.Parse(stream.GetProperty("nb_read_frames").GetString()!);
     var duration = double.Parse(json.RootElement.GetProperty("format").GetProperty("duration").GetString()!, System.Globalization.CultureInfo.InvariantCulture);
-    Check(frames is >= 1 and <= 4 && Math.Abs(duration - frames / 2.0) < 0.1, "segment timing matches frame count");
+    Check(frames is >= 1 and <= 20 && Math.Abs(duration - frames / 10.0) < 0.1, "segment timing matches frame count");
     await RunAsync(ffmpeg, "-v", "error", "-xerror", "-i", clip, "-f", "null", "-");
 }
 Console.WriteLine($"PASS: renewal, reconnect, worker shutdown, and full decode of {clips.Length} H.264 segments.");

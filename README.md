@@ -1,6 +1,16 @@
 # Rust CCTV recorder
 
-Phase 1: one Rust+ connection, one case-sensitive camera ID, PNG frames piped directly into one FFmpeg process per recording session, and timestamped H.264 MP4 segments. Defaults: 2 FPS, 15-minute segments, `libx264` ultrafast, CRF 25, two encoder threads. No temporary PNG sequence is written.
+Local recorder: one Rust+ connection, one case-sensitive camera ID, PNG frames piped directly into one FFmpeg process per recording session, and timestamped H.264 MP4 segments. Defaults: 10 FPS, 2x render scale, 15-minute segments, `libx264` ultrafast, CRF 18, two encoder threads. No temporary PNG sequence is written.
+
+## Readable camera rendering
+
+The recorder now uses its own renderer. Surface shading retains an ambient brightness floor, so zero-alignment rays no longer turn the ground and other surfaces completely black. Material colours are chosen for readability; they are not game textures or a verified reproduction of the official app's shader. No-hit rays and areas without recent samples use a dark background.
+
+Samples accumulate for up to three seconds, fading during the last quarter of that interval. This bounds old trails while allowing sparse packets to fill the image. Camera movement or zoom clears the old projection. If the camera's updates are unusually sparse, increase `SampleLifetimeSeconds` (at the cost of longer trails). Player markers and server-provided names use the latest packet's metadata and expire after 0.75 seconds without an update. Names currently use portable uppercase ASCII lettering; unsupported characters display `?`. Markers indicate the reported position and size, not an exact silhouette or team membership.
+
+For a 320x180 camera, the default output is 640x360 at 10 FPS. Scaling preserves the source samples and makes labels easier to read; it does not create additional camera detail. Higher recording FPS samples incoming updates more often, but cannot increase the server's update rate. CRF 18 reduces compression loss compared with the previous CRF 25 setting. Pi performance still needs a live check; lower `Fps` or `RenderScale` if the encoder cannot keep up.
+
+These changes apply to new recordings. An existing MP4 does not contain the raw depths, materials, and entity metadata needed to render it again.
 
 ## Project state and package verification
 
@@ -9,7 +19,7 @@ The supplied Windows workspace was empty. The existing Raspberry Pi snapshot pro
 The target remains `net8.0`. Both Rust packages are pinned to exactly `2.0.0-beta.9` with NuGet version ranges and `packages.lock.json`. Their restored NuGet metadata points to commit `3b45e28edbdd81a077c01784b5707febc4832dc9`, identical to `v2.0.0-beta.9`. The netstandard2.0 assemblies were used for compilation. Signatures were checked against their XML metadata and that exact source revision:
 
 - [CameraController source](https://github.com/HandyS11/RustPlusApi/blob/3b45e28edbdd81a077c01784b5707febc4832dc9/src/RustPlusApi.Camera/CameraController.cs): `SubscribeAsync`, `OnFrameReceived`, `OnKeepAliveFailed`, and asynchronous disposal. Default renewal is every 10 seconds.
-- [CameraRenderer source](https://github.com/HandyS11/RustPlusApi/blob/3b45e28edbdd81a077c01784b5707febc4832dc9/src/RustPlusApi.Camera/CameraRenderer.cs): `AddRays(CameraFrame)` and `Render()` returning PNG bytes.
+- [Reference camera decoder](https://github.com/HandyS11/RustPlusApi/blob/3b45e28edbdd81a077c01784b5707febc4832dc9/src/RustPlusApi.Camera/CameraRenderer.cs): the local `Rendering/` implementation preserves its sample shuffle and wire format, fixes a skipped final one-byte ray, and replaces its shading/accumulation. See `THIRD_PARTY_NOTICES.txt`.
 
 No systemd unit, events, dashboard, notifications, retention deletion, or additional cameras are implemented yet. Recordings accumulate until you remove them.
 
@@ -64,11 +74,13 @@ Environment overrides use .NET's double underscore separator, for example `Recor
 |---|---:|---|
 | `CameraId` | empty | Required; exact identifier, at most 256 characters |
 | `OutputDirectory` | `recordings` | Relative to the current working directory, or absolute |
-| `Fps` | 2 | Integer 1–30; start at 2 on the Pi |
+| `Fps` | 10 | Integer 1–30; reduce if the Pi cannot keep up |
+| `RenderScale` | 2 | Integer 1–4; multiplies native dimensions, without adding source detail |
+| `SampleLifetimeSeconds` | 3 | 0.25–30; maximum age of retained ray samples |
 | `SegmentMinutes` | 15 | 1/60–1440; segment cuts fall on video frames |
 | `FfmpegPath` | `ffmpeg` | Executable name on PATH or absolute path |
 | `EncoderThreads` | 2 | 1–4; PNG input decoding uses one thread |
-| `Crf` | 25 | 0–51; larger values reduce size and quality |
+| `Crf` | 18 | 0–51; larger values reduce size and quality |
 | `FrameTimeoutSeconds` | 30 | 1–300; first-frame and ongoing ray inactivity deadline |
 | `RequestTimeoutSeconds` | 15 | 1–120; connect/subscribe and API request deadlines |
 | `WriteTimeoutSeconds` | 10 | 1–120; stalled encoder input deadline |
@@ -77,7 +89,7 @@ Environment overrides use .NET's double underscore separator, for example `Recor
 | `ReconnectMaxSeconds` | 60 | 1–300; cap for exponential backoff with jitter |
 | `SnapshotSeconds` | 15 | 1–300; accumulation time after first received rays |
 
-Configuration is read at startup; restart to apply changes. The worker uses an absolute monotonic clock for frame pacing. Each tick samples the latest reconstructed image, reusing the last PNG when no new rays arrived. Slow frame work can catch up within the configured lag allowance; sustained overload closes the session instead of allowing unbounded queues or silently accumulating timing drift. Reconnects start a fresh timeline and renderer, leaving an actual gap in recordings.
+Configuration is read at startup; restart to apply changes. The worker uses an absolute monotonic clock for frame pacing. Each tick renders the latest samples, including expiry of old pixels and player markers when no new packet arrives. Slow frame work can catch up within the configured lag allowance; sustained overload closes the session instead of allowing unbounded queues or silently accumulating timing drift. Reconnects start a fresh timeline and renderer, leaving an actual gap in recordings.
 
 `AddRays` and `Render` share a lock; pipe and disk I/O happen outside it. The library controller owns subscription keep-alives. Disconnects, transport errors, renewal failures, changed image dimensions, and prolonged ray inactivity end the current session. FFmpeg finalizes first, the camera/controller/socket are disposed, and the worker reconnects with backoff. A session lasting two minutes resets backoff.
 
@@ -103,8 +115,9 @@ Normal shutdown closes input and waits independently of the canceled host token.
 
 The integration harness runs a synthetic local Rust+ WebSocket server using the actual protobuf contracts and beta packages, plus real FFmpeg and ffprobe. No live credentials or Rust server are used. It verifies:
 
+- Ray instruction decoding, final lookback samples, sample-position shuffle, readable shadows, sample expiry, view resets, player marker projection/clipping, and output scaling.
 - Periodic renewal on one connection, live segment rotation, disconnect/reconnect, worker cancellation, and finalization.
-- H.264, pixel format, image size, frame rate, frame counts, duration, and complete error-free decoding of every output segment.
+- H.264, pixel format, scaled image size, 10 FPS, frame counts, duration, and complete error-free decoding of every output segment.
 - Snapshot PNG rendering, stale rays, failed renewals, and missing initial rays.
 - Stalled encoder writes, bounded forced termination, and early FFmpeg exit.
 
@@ -115,6 +128,8 @@ dotnet run --project tests/RustCctv.Integration
 ```
 
 Set `TEST_FFMPEG` and `TEST_FFPROBE` to absolute executable paths if needed. Tests write under an ignored, unique `test-output/` directory. A self-contained test publish is also supported, for example `dotnet publish tests/RustCctv.Integration -c Release -r linux-arm64 --self-contained true -o test-runner`. Run that executable directly when testing without installed runtimes.
+
+Run `dotnet run --project tests/RustCctv.Integration -- --renderer-only` for renderer checks without FFmpeg or a network listener. Optional upstream live ray fixtures in `test-output/reference/` additionally exercise complete captured packets and save before/after PNGs. These optional fixtures are not required or downloaded by the tests.
 
 Local checks used the .NET 8.0.31 Windows runtime and FFmpeg 8.1.2. This verifies application behavior with synthetic rays; it does **not** establish Pi performance, real-server availability, or actual Linux signal delivery.
 
