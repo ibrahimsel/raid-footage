@@ -1,0 +1,10 @@
+bin/
+obj/
+.tools/
+.nuget/
+.dotnet/
+recordings/
+test-output/
+snapshot.png
+.env
+appsettings.Local.json
