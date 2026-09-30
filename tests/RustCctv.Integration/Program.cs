@@ -22,6 +22,7 @@ var output = Path.GetFullPath(Path.Combine("test-output", Guid.NewGuid().ToStrin
 using var loggers = LoggerFactory.Create(b => b.AddSimpleConsole(o => o.SingleLine = true));
 Console.WriteLine($"Integration runtime: {Environment.Version}; output: {output}");
 RendererChecks.Run(output);
+TimedRendererChecks.Run(output);
 if (args.Contains("--renderer-only")) return 0;
 await using var server = new CameraServer();
 await server.StartAsync();

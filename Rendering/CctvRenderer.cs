@@ -26,6 +26,8 @@ public sealed class CctvRenderer
     private readonly int height;
     private readonly int scale;
     private readonly double lifetime;
+    private double estimatedSweepSeconds;
+    private long? lastSamplesAt;
     private readonly TimeProvider time;
     private readonly int[] positions;
     private readonly CameraRay[] rays;
@@ -62,8 +64,20 @@ public sealed class CctvRenderer
             Array.Clear(known);
             viewReference = frame;
         }
+        else if ((viewReference.CameraRotation is null && frame.CameraRotation is not null)
+            || (viewReference.CameraPosition is null && frame.CameraPosition is not null))
+        {
+            // Pose metadata can arrive after the first ray packet. Start comparing
+            // against its first known value instead of keeping a null reference forever.
+            viewReference = viewReference with
+            {
+                CameraRotation = viewReference.CameraRotation ?? frame.CameraRotation,
+                CameraPosition = viewReference.CameraPosition ?? frame.CameraPosition
+            };
+        }
         var now = time.GetTimestamp();
         var cursor = frame.SampleOffset % positions.Length;
+        var sampleCount = 0;
         foreach (var ray in CameraRayDecoder.Decode(frame.RayData))
         {
             var index = positions[cursor];
@@ -71,7 +85,9 @@ public sealed class CctvRenderer
             received[index] = now;
             known[index] = true;
             cursor = (cursor + 1) % positions.Length;
+            sampleCount++;
         }
+        UpdateSweepEstimate(sampleCount, now);
         // Copy entities so a caller cannot mutate a list while a subsequent frame renders.
         lastFrame = frame with { Entities = frame.Entities.Where(entity => entity.Type == CameraEntityType.Player)
             .Take(256).ToArray() };
@@ -81,6 +97,9 @@ public sealed class CctvRenderer
     public byte[] Render()
     {
         var now = time.GetTimestamp();
+        // Allow a complete native-resolution sample sweep plus headroom. A fixed
+        // three-second expiry can erase pixels before a sparse feed revisits them.
+        var retention = Math.Max(lifetime, Math.Min(30, estimatedSweepSeconds * 1.5));
         using var image = new Image<Rgba32>(width, height, Background);
         image.ProcessPixelRows(accessor =>
         {
@@ -92,7 +111,7 @@ public sealed class CctvRenderer
                     var index = y * width + x;
                     if (!known[index]) continue;
                     var age = time.GetElapsedTime(received[index], now).TotalSeconds;
-                    if (age >= lifetime) { known[index] = false; continue; }
+                    if (age >= retention) { known[index] = false; continue; }
                     var ray = rays[index];
                     // The no-hit sentinel contains no surface. Leave it as background.
                     if (ray is { Distance: 1023, Alignment: 0, Material: 0 }) continue;
@@ -100,7 +119,7 @@ public sealed class CctvRenderer
                     var light = 0.38 + 0.62 * Math.Sqrt(ray.Alignment / 63.0);
                     // Fade only at the end of the retention interval. Old samples must
                     // not survive forever when a player or the camera moves.
-                    var freshness = Math.Clamp((lifetime - age) / (lifetime * 0.25), 0, 1);
+                    var freshness = Math.Clamp((retention - age) / (retention * 0.25), 0, 1);
                     row[x] = new Rgba32(Shade(colour.R, Background.R), Shade(colour.G, Background.G),
                         Shade(colour.B, Background.B));
                     byte Shade(byte channel, byte backdrop) =>
@@ -118,14 +137,34 @@ public sealed class CctvRenderer
         return stream.ToArray();
     }
 
+    private void UpdateSweepEstimate(int sampleCount, long now)
+    {
+        if (sampleCount == 0) return;
+        if (lastSamplesAt is { } previous)
+        {
+            var interval = time.GetElapsedTime(previous, now).TotalSeconds;
+            if (interval > 0)
+            {
+                var observed = Math.Min(30, interval * positions.Length / Math.Min(sampleCount, positions.Length));
+                // Extend promptly when delivery slows; shorten gradually when it
+                // recovers so packet jitter does not repeatedly punch holes in the scene.
+                estimatedSweepSeconds = observed > estimatedSweepSeconds ? observed
+                    : estimatedSweepSeconds * 0.9 + observed * 0.1;
+            }
+        }
+        lastSamplesAt = now;
+    }
+
     private static bool ViewChanged(CameraFrame previous, CameraFrame current)
     {
         if (float.IsFinite(previous.VerticalFov) && float.IsFinite(current.VerticalFov)
             && Math.Abs(previous.VerticalFov - current.VerticalFov) > 0.25) return true;
         if (previous.CameraPosition is { } a && current.CameraPosition is { } b
             && (Math.Abs(a.X - b.X) > 0.05 || Math.Abs(a.Y - b.Y) > 0.05 || Math.Abs(a.Z - b.Z) > 0.05)) return true;
-        var oldRotation = previous.SampleRotation ?? previous.CameraRotation;
-        var newRotation = current.SampleRotation ?? current.CameraRotation;
+        // SampleRotation is the ray-casting orientation and includes sampling jitter.
+        // Only the physical camera pose is a reason to discard the accumulated view.
+        var oldRotation = previous.CameraRotation;
+        var newRotation = current.CameraRotation;
         return oldRotation is { } c && newRotation is { } d
             && (Angle(c.X, d.X) > 0.5 || Angle(c.Y, d.Y) > 0.5 || Angle(c.Z, d.Z) > 0.5);
     }

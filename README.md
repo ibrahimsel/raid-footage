@@ -6,7 +6,9 @@ Local recorder: one Rust+ connection, one case-sensitive camera ID, PNG frames p
 
 The recorder now uses its own renderer. Surface shading retains an ambient brightness floor, so zero-alignment rays no longer turn the ground and other surfaces completely black. Material colours are chosen for readability; they are not game textures or a verified reproduction of the official app's shader. No-hit rays and areas without recent samples use a dark background.
 
-Samples accumulate for up to three seconds, fading during the last quarter of that interval. This bounds old trails while allowing sparse packets to fill the image. Camera movement or zoom clears the old projection. If the camera's updates are unusually sparse, increase `SampleLifetimeSeconds` (at the cost of longer trails). Player markers and server-provided names use the latest packet's metadata and expire after 0.75 seconds without an update. Names currently use portable uppercase ASCII lettering; unsupported characters display `?`. Markers indicate the reported position and size, not an exact silhouette or team membership.
+Samples accumulate long enough to cover a full refresh of the camera's native pixel grid. `SampleLifetimeSeconds` sets a minimum (three seconds by default); the renderer extends it to 1.5 times the estimated refresh period for sparse feeds, capped at 30 seconds. Samples fade only during the last quarter of that interval and eventually expire if the feed stops. Longer retention can leave longer trails behind moving objects. Physical camera movement or zoom clears the old projection; changes in the ray-sampling rotation do not. Rust added [server-side raycast jitter](https://commits.facepunch.com/610661), which must not be mistaken for physical camera movement.
+
+Player markers and server-provided names use the latest packet's metadata and expire after 0.75 seconds without an update. Names currently use portable uppercase ASCII lettering; unsupported characters display `?`. Markers indicate the reported position and size, not an exact silhouette or team membership.
 
 For a 320x180 camera, the default output is 640x360 at 10 FPS. Scaling preserves the source samples and makes labels easier to read; it does not create additional camera detail. Higher recording FPS samples incoming updates more often, but cannot increase the server's update rate. CRF 18 reduces compression loss compared with the previous CRF 25 setting. Pi performance still needs a live check; lower `Fps` or `RenderScale` if the encoder cannot keep up.
 
@@ -76,7 +78,7 @@ Environment overrides use .NET's double underscore separator, for example `Recor
 | `OutputDirectory` | `recordings` | Relative to the current working directory, or absolute |
 | `Fps` | 10 | Integer 1–30; reduce if the Pi cannot keep up |
 | `RenderScale` | 2 | Integer 1–4; multiplies native dimensions, without adding source detail |
-| `SampleLifetimeSeconds` | 3 | 0.25–30; maximum age of retained ray samples |
+| `SampleLifetimeSeconds` | 3 | 0.25–30; minimum retention, extended for sparse feeds up to a 30-second cap |
 | `SegmentMinutes` | 15 | 1/60–1440; segment cuts fall on video frames |
 | `FfmpegPath` | `ffmpeg` | Executable name on PATH or absolute path |
 | `EncoderThreads` | 2 | 1–4; PNG input decoding uses one thread |
@@ -116,6 +118,7 @@ Normal shutdown closes input and waits independently of the canceled host token.
 The integration harness runs a synthetic local Rust+ WebSocket server using the actual protobuf contracts and beta packages, plus real FFmpeg and ffprobe. No live credentials or Rust server are used. It verifies:
 
 - Ray instruction decoding, final lookback samples, sample-position shuffle, readable shadows, sample expiry, view resets, player marker projection/clipping, and output scaling.
+- Timed sparse packets with changing sampling rotation at 2 and 5 packets/second, accumulation across complete refresh cycles, real camera turns, and expiry after the stream stops.
 - Periodic renewal on one connection, live segment rotation, disconnect/reconnect, worker cancellation, and finalization.
 - H.264, pixel format, scaled image size, 10 FPS, frame counts, duration, and complete error-free decoding of every output segment.
 - Snapshot PNG rendering, stale rays, failed renewals, and missing initial rays.
