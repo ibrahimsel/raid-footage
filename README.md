@@ -1,5 +1,7 @@
 # Rust CCTV recorder
 
+## Disclosure: Don't expect the exact gameplay footage. The data is reconstructed with a custom written renderer. So you'll get some sort of a pointcloud.
+
 Local recorder: one Rust+ connection, one case-sensitive camera ID, PNG frames piped directly into one FFmpeg process per recording session, and timestamped H.264 MP4 segments. Defaults: 10 FPS, 2x render scale, 15-minute segments, `libx264` ultrafast, CRF 18, two encoder threads. No temporary PNG sequence is written.
 
 ## Readable camera rendering
