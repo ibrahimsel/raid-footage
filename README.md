@@ -148,3 +148,11 @@ ffmpeg -v error -xerror -i 'recordings/CAMERA/file.mp4' -f null -
 ```
 
 Also play a clip and check CPU, memory, disk growth, timestamps, and visible image content on the Pi. Only that live check completes the requested camera-to-playable-MP4 milestone. Keep the original snapshot prototype until it passes.
+
+## Credits
+
+This project was inspired by [HandyS11's RustPlusApi](https://github.com/HandyS11/RustPlusApi), a C# library for the Rust+ companion API.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
